@@ -16,7 +16,9 @@ import { useSettings } from "./hooks/useSettings";
 import { useStations } from "./hooks/useStations";
 import { engine } from "./audio/engine";
 import {
+  coverArtUrl,
   getCover,
+  isLinux,
   loadStore,
   pickFolder,
   prefetchRadioProxy,
@@ -433,7 +435,17 @@ function App() {
         title: t.title || "",
         artist: t.artist || "",
         album: t.album || "",
-        artwork: coverUrl ? [{ src: coverUrl, sizes: "512x512", type: "image/jpeg" }] : [],
+        // GNOME's MPRIS popup can't render a data: URI, so on Linux point the
+        // artwork at the loopback /cover URL; Windows SMTC takes the data URI.
+        artwork: coverUrl
+          ? [
+              {
+                src: (isLinux && currentPath ? coverArtUrl(currentPath) : coverUrl) ?? coverUrl,
+                sizes: "512x512",
+                type: "image/jpeg",
+              },
+            ]
+          : [],
       });
       ms.playbackState = player.isPlaying ? "playing" : "paused";
     } else {

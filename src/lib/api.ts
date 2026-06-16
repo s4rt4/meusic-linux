@@ -24,7 +24,16 @@ export async function getCover(path: string): Promise<string | null> {
 
 // webkit2gtk (Linux) can't play media from the custom `asset://` scheme, so on
 // Linux we stream local files over the same loopback HTTP server the radio uses.
-const isLinux = /Linux|X11/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
+export const isLinux =
+  /Linux|X11/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
+
+/** HTTP cover-art URL for a track, served by the loopback server. GNOME's MPRIS
+ *  media popup needs a fetchable art URL (a data: URI won't render), so on Linux
+ *  mediaSession artwork points here. Null until the proxy port is known. */
+export function coverArtUrl(path: string): string | null {
+  if (cachedProxyPort == null) return null;
+  return `http://127.0.0.1:${cachedProxyPort}/cover?path=${encodeURIComponent(path)}`;
+}
 
 /** Turn an absolute file path into a URL the <audio> element can play.
  *  Windows/macOS: the Tauri asset protocol. Linux: the loopback `/file` route

@@ -181,30 +181,26 @@ fn image_mime(path: &Path) -> &'static str {
     }
 }
 
-fn file_as_data_uri(path: &Path) -> Option<String> {
+fn read_image_bytes(path: &Path) -> Option<(Vec<u8>, String)> {
     let bytes = std::fs::read(path).ok()?;
     if bytes.is_empty() {
         return None;
     }
-    Some(format!(
-        "data:{};base64,{}",
-        image_mime(path),
-        STANDARD.encode(&bytes)
-    ))
+    Some((bytes, image_mime(path).to_string()))
 }
 
 /// Look beside the audio file for a standalone cover image — first the common
 /// well-known names (cover.jpg, folder.jpg, …), then any image in the folder.
 /// This is how players like Dopamine find art for files without embedded tags.
-fn folder_cover(audio_path: &Path) -> Option<String> {
+fn folder_cover_bytes(audio_path: &Path) -> Option<(Vec<u8>, String)> {
     let dir = audio_path.parent()?;
 
     for name in COVER_NAMES {
         for ext in IMAGE_EXTS {
             let candidate = dir.join(format!("{name}.{ext}"));
             if candidate.is_file() {
-                if let Some(uri) = file_as_data_uri(&candidate) {
-                    return Some(uri);
+                if let Some(img) = read_image_bytes(&candidate) {
+                    return Some(img);
                 }
             }
         }
@@ -221,8 +217,8 @@ fn folder_cover(audio_path: &Path) -> Option<String> {
                 .map(|e| IMAGE_EXTS.contains(&e.to_lowercase().as_str()))
                 .unwrap_or(false);
             if is_image {
-                if let Some(uri) = file_as_data_uri(&p) {
-                    return Some(uri);
+                if let Some(img) = read_image_bytes(&p) {
+                    return Some(img);
                 }
             }
         }
@@ -230,14 +226,10 @@ fn folder_cover(audio_path: &Path) -> Option<String> {
     None
 }
 
-/// Cover art for a single track as a base64 data URI: embedded art first, then
-/// a standalone image in the track's folder. Loaded lazily (per displayed/
-/// playing track) so large libraries stay light on memory.
-#[tauri::command]
-fn get_cover(path: String) -> Option<String> {
-    let p = Path::new(&path);
-
-    // 1. Embedded picture in the tags.
+/// Cover art bytes + MIME for a track: embedded art first, then a standalone
+/// image in the track's folder. Shared by `get_cover` (UI, as a data URI) and
+/// the `/cover` loopback route (MPRIS art, which needs a fetchable URL).
+pub(crate) fn cover_bytes(p: &Path) -> Option<(Vec<u8>, String)> {
     if let Ok(tagged) = read_from_path(p) {
         if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
             if let Some(pic) = tag.pictures().first() {
@@ -245,13 +237,20 @@ fn get_cover(path: String) -> Option<String> {
                     .mime_type()
                     .map(|m| m.as_str().to_string())
                     .unwrap_or_else(|| "image/jpeg".to_string());
-                return Some(format!("data:{};base64,{}", mime, STANDARD.encode(pic.data())));
+                return Some((pic.data().to_vec(), mime));
             }
         }
     }
+    folder_cover_bytes(p)
+}
 
-    // 2. A cover image sitting in the same folder.
-    folder_cover(p)
+/// Cover art for a single track as a base64 data URI: embedded art first, then
+/// a standalone image in the track's folder. Loaded lazily (per displayed/
+/// playing track) so large libraries stay light on memory.
+#[tauri::command]
+fn get_cover(path: String) -> Option<String> {
+    cover_bytes(Path::new(&path))
+        .map(|(bytes, mime)| format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
 }
 
 // ---- Crash / error logging --------------------------------------------------
