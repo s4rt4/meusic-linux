@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+/* NOTE: do NOT add an un-layered `* { margin:0; padding:0 }` reset here.
+   Tailwind v4's preflight already resets these inside @layer base, and an
+   un-layered rule overrides ALL layered Tailwind p-*/m-* utilities. */
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: #07070b;
+  color: #f5f5f7;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* Frosted-glass surface used across panels */
+.glass {
+  background: rgba(20, 20, 28, 0.45);
+  backdrop-filter: blur(28px) saturate(140%);
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Near-opaque variant for floating menus (Settings, Equalizer) that must stay
+   readable even over a bright adaptive-gradient background. */
+.glass-strong {
+  background: rgba(17, 17, 24, 0.93);
+  backdrop-filter: blur(32px) saturate(140%);
+  -webkit-backdrop-filter: blur(32px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* About dialog entrance */
+@keyframes aboutPop {
+  from { opacity: 0; transform: scale(0.94) translateY(6px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* Slow drifting motion for the Amberol-style gradient blobs */
+@keyframes drift {
+  0%   { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(6%, -8%) scale(1.15); }
+  66%  { transform: translate(-7%, 5%) scale(0.92); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+/* Thin, subtle scrollbar. The transparent border + padding-box clip insets the
+   thumb so it floats away from the edges and rounded card corners. */
+*::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Range input (seek + volume + EQ) base styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.4);
+  margin-top: -5px;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
