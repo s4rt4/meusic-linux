@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "license": "MIT",
-  "description": "A lightweight, native local music player for Windows",
+  "description": "A lightweight, native local music player",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

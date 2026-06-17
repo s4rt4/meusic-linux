@@ -1,15 +1,16 @@
 //! Local streaming proxy for internet radio.
 //!
-//! WebView2/Chromium can't read ICY metadata, needs CORS to keep the Web Audio
-//! graph (EQ + visualizer) untainted, and blocks plain-http streams as mixed
-//! content. So we run a tiny loopback HTTP server: the `<audio>` element streams
+//! The webview (WebView2/Chromium on Windows, WebKitGTK on Linux) can't read ICY
+//! metadata, needs CORS to keep the Web Audio graph (EQ + visualizer) untainted,
+//! and blocks plain-http streams as mixed content. So we run a tiny loopback HTTP
+//! server: the `<audio>` element streams
 //! from `http://127.0.0.1:<port>/radio?url=<upstream>`, and we fetch the
 //! upstream server-side, strip the interleaved ICY metadata (emitting song
 //! titles to the frontend via the `radio:meta` event), and forward clean audio
 //! with `Access-Control-Allow-Origin: *`.
 
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
@@ -93,13 +94,6 @@ fn handle(app: AppHandle, request: tiny_http::Request) {
     // support for seeking) — same trick as the radio proxy, CORS-clean for EQ.
     if request.url().starts_with("/file") {
         serve_file(request);
-        return;
-    }
-
-    // Cover-art route: GNOME's media popup (MPRIS) needs a fetchable art URL,
-    // not a data: URI, so the frontend points mediaSession artwork here.
-    if request.url().starts_with("/cover") {
-        serve_cover(request);
         return;
     }
 
@@ -252,35 +246,6 @@ fn serve_file(request: tiny_http::Request) {
                 Response::new(StatusCode(200), headers, file, Some(total as usize), None)
                     .with_chunked_threshold(usize::MAX),
             );
-        }
-    }
-}
-
-/// Serve a track's cover art (embedded or folder image) over loopback HTTP, so
-/// the MPRIS art URL is fetchable by GNOME. 404 when the track has no art.
-fn serve_cover(request: tiny_http::Request) {
-    let path = match query_param(request.url(), "path") {
-        Some(p) => p,
-        None => {
-            let _ = request.respond(Response::empty(StatusCode(400)));
-            return;
-        }
-    };
-    match crate::cover_bytes(Path::new(&path)) {
-        Some((bytes, mime)) => {
-            let len = bytes.len();
-            let headers = vec![
-                header("Content-Type", &mime),
-                header("Access-Control-Allow-Origin", "*"),
-                header("Cache-Control", "no-cache"),
-            ];
-            let _ = request.respond(
-                Response::new(StatusCode(200), headers, Cursor::new(bytes), Some(len), None)
-                    .with_chunked_threshold(usize::MAX),
-            );
-        }
-        None => {
-            let _ = request.respond(Response::empty(StatusCode(404)));
         }
     }
 }

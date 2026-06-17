@@ -381,7 +381,8 @@ export function usePlayer() {
       next();
     };
     // Surface decode/load failures (otherwise swallowed): some FLACs play in
-    // ffmpeg-based players but Chromium/WebView2's stricter decoder rejects them.
+    // ffmpeg-based players but the webview's stricter decoder (Chromium/WebView2
+    // on Windows, WebKitGTK on Linux) rejects them.
     const onError = () => {
       logPlaybackError("error event");
       // For radio, the proxy's radio:error (with permanent flag) decides whether

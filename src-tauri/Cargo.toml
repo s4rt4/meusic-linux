@@ -33,3 +33,8 @@ chrono = "0.4"
 # upstream streams (ureq) to the <audio> element, stripping ICY metadata.
 tiny_http = "0.12"
 ureq = "2"
+
+# Linux: native MPRIS2 media-player service (D-Bus) so the GNOME media popup
+# gets full metadata incl. cover art. zbus version matches wry's transitive dep.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"

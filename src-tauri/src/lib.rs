@@ -1,6 +1,7 @@
 // meusic — Rust backend
 // Recursive audio library scanning + tag/cover-art extraction via lofty.
 
+mod mpris;
 mod radio;
 
 use base64::engine::general_purpose::STANDARD;
@@ -253,6 +254,62 @@ fn get_cover(path: String) -> Option<String> {
         .map(|(bytes, mime)| format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
 }
 
+/// Extract a track's cover art to a temp file and return it as a `file://` URL,
+/// for the native MPRIS service's `mpris:artUrl` (Linux). webkit drops a
+/// `file://` artUrl set from the page's http origin, so the art has to come from
+/// our own MPRIS service instead. One file per track (hashed name) so GNOME's
+/// URI-keyed art cache refreshes when the track changes. Returns None for art-
+/// less tracks.
+#[cfg(target_os = "linux")]
+pub(crate) fn art_file_url(path: &str) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let (bytes, mime) = cover_bytes(Path::new(path))?;
+    let ext = match mime.as_str() {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        _ => "jpg",
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let dir = std::env::temp_dir().join("meusic-art");
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join(format!("{:016x}.{ext}", hasher.finish()));
+    if !file.exists() {
+        std::fs::write(&file, &bytes).ok()?;
+    }
+    Some(file_uri(&file))
+}
+
+/// Percent-encode an absolute path into a `file://` URL (keeps `/` literal,
+/// encodes spaces and other reserved bytes) so Gio/GNOME can parse it.
+#[cfg(target_os = "linux")]
+fn file_uri(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let mut out = String::from("file://");
+    for &b in s.as_bytes() {
+        match b {
+            b'/' => out.push('/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+// NOTE: webkit2gtk also publishes its own MPRIS player for any audio played in
+// the webview, and there is no app-side way to disable it (it has no settings
+// property; its runtime feature flags only move the manager between processes,
+// not turn it off) nor to hide it selectively (it reports Identity "meusic",
+// same as ours). So on Linux the GNOME popup shows two "meusic" entries: our
+// native service (the real one, with cover + controls) and webkit's redundant
+// clone. A single-player alternative is to drop the native service and feed
+// webkit's player an http art URL with the Media Controls extension's
+// `cache-art` enabled — kept in mind but not chosen here.
+
 // ---- Crash / error logging --------------------------------------------------
 
 /// Per-user log file: %LOCALAPPDATA%\meusic\meusic.log on Windows, and
@@ -337,9 +394,10 @@ fn set_tray_visible(app: tauri::AppHandle, visible: bool) {
 
 // ---- Persistent key/value store (file-backed) -------------------------------
 // Settings/session are written to disk so they survive an OS shutdown, which can
-// kill the process before WebView2 flushes localStorage to disk.
+// kill the process before the webview flushes localStorage to disk.
 
-/// Path to `<name>.json` in the per-app config dir (%APPDATA%\com.sarta.meusic).
+/// Path to `<name>.json` in the per-app config dir (%APPDATA%\com.sarta.meusic
+/// on Windows, ~/.config/com.sarta.meusic on Linux).
 fn store_path(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
     let dir = app.path().app_config_dir().ok()?;
     let _ = std::fs::create_dir_all(&dir);
@@ -404,11 +462,33 @@ pub fn run() {
 
             // Start the internet-radio streaming proxy (loopback HTTP server).
             radio::start(app.handle().clone());
+
+            // Linux: expose our own MPRIS service for the OS media popup, with
+            // full cover-art control (webkit's built-in bridge can't show art).
+            #[cfg(target_os = "linux")]
+            {
+                mpris::start(app.handle().clone());
+
+                // GNOME has no system tray to hide-to, so closing the main window
+                // quits the app (otherwise the hidden miniplayer window keeps the
+                // process alive invisibly). The JS close interception is disabled
+                // on Linux, so this is the single, deterministic close handler.
+                if let Some(main) = app.get_webview_window("main") {
+                    let handle = app.handle().clone();
+                    main.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { .. } = event {
+                            handle.exit(0);
+                        }
+                    });
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             scan_folder,
             get_cover,
+            mpris::mpris_update,
+            mpris::mpris_position,
             set_tray_visible,
             log_event,
             load_store,

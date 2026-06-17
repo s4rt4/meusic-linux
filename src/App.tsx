@@ -16,10 +16,11 @@ import { useSettings } from "./hooks/useSettings";
 import { useStations } from "./hooks/useStations";
 import { engine } from "./audio/engine";
 import {
-  coverArtUrl,
   getCover,
   isLinux,
   loadStore,
+  mprisPosition,
+  mprisUpdate,
   pickFolder,
   prefetchRadioProxy,
   saveStore,
@@ -162,7 +163,12 @@ function App() {
   }, [settings.trayIcon]);
 
   // Minimize-to-tray / close-to-tray (gated on tray icon being enabled).
+  // Linux/GNOME has no system tray, so we don't intercept close/resize here at
+  // all — native window behavior is used (minimize → dock), and "close = quit"
+  // is handled in the Rust backend. Intercepting close in JS on Linux also
+  // wedged the window (it stopped closing), so skip the listeners entirely.
   useEffect(() => {
+    if (isLinux) return;
     const win = getCurrentWindow();
     let unClose: (() => void) | undefined;
     let unResize: (() => void) | undefined;
@@ -372,6 +378,86 @@ function App() {
     })();
   }, [currentPath, appMode]);
 
+  // Linux: drive meusic's own MPRIS service (the GNOME media popup). webkit's
+  // built-in bridge can't expose cover art, so the backend runs a native MPRIS
+  // player; here we push now-playing metadata + playback state to it.
+  useEffect(() => {
+    if (!isLinux) return;
+    if (player.mediaKind === "radio" && player.radioStation) {
+      const st = player.radioStation;
+      const song = player.radioMeta.title;
+      void mprisUpdate({
+        path: null,
+        title: song || st.name,
+        artist: song ? st.name : player.radioMeta.name || "Radio",
+        album: "",
+        lengthSecs: 0,
+        status: player.radioPlaying ? "Playing" : "Paused",
+      });
+    } else if (player.current) {
+      const t = player.current;
+      void mprisUpdate({
+        path: t.path,
+        title: t.title || "",
+        artist: t.artist || "",
+        album: t.album || "",
+        lengthSecs: player.duration || t.duration || 0,
+        status: player.isPlaying ? "Playing" : "Paused",
+      });
+    } else {
+      void mprisUpdate({
+        path: null,
+        title: "",
+        artist: "",
+        album: "",
+        lengthSecs: 0,
+        status: "Stopped",
+      });
+    }
+  }, [
+    player.mediaKind,
+    player.current,
+    player.isPlaying,
+    player.duration,
+    player.radioStation,
+    player.radioPlaying,
+    player.radioMeta.title,
+    player.radioMeta.name,
+  ]);
+
+  // Linux: push the playback position to MPRIS (~1/s); cheap, no D-Bus signal.
+  useEffect(() => {
+    if (!isLinux) return;
+    if (player.mediaKind === "music") void mprisPosition(player.currentTime);
+  }, [player.mediaKind, player.currentTime]);
+
+  // Linux: handle control actions coming back from MPRIS (popup / media keys).
+  useEffect(() => {
+    if (!isLinux) return;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("mpris", (e) => {
+      const p = playerRef.current;
+      switch (e.payload) {
+        case "play":
+        case "pause":
+        case "playpause":
+        case "stop":
+          if (p.mediaKind === "radio") p.radioToggle();
+          else p.toggle();
+          break;
+        case "next":
+          if (p.mediaKind !== "radio") p.next();
+          break;
+        case "previous":
+          if (p.mediaKind !== "radio") p.prev();
+          break;
+      }
+    }).then((f) => {
+      unlisten = f;
+    });
+    return () => unlisten?.();
+  }, []);
+
   // Radio mode: the adaptive gradient follows the station's tile color.
   useEffect(() => {
     if (appMode !== "radio") return;
@@ -383,8 +469,10 @@ function App() {
   // Transport Controls, which is what desktop widgets / the media flyout /
   // media keys read. Without this, only the app name ("meusic") shows.
 
-  // Media-key / flyout action handlers (set once).
+  // Media-key / flyout action handlers (set once). Linux uses the native MPRIS
+  // service instead (see the "mpris" listener above), so skip there.
   useEffect(() => {
+    if (isLinux) return;
     const ms = navigator.mediaSession;
     if (!ms) return;
     const set = (a: MediaSessionAction, cb: (() => void) | null) => {
@@ -416,8 +504,9 @@ function App() {
     };
   }, []);
 
-  // Now-playing metadata + playback state.
+  // Now-playing metadata + playback state (Windows SMTC; Linux uses MPRIS).
   useEffect(() => {
+    if (isLinux) return;
     const ms = navigator.mediaSession;
     if (!ms) return;
     if (player.mediaKind === "radio" && player.radioStation) {
@@ -435,12 +524,11 @@ function App() {
         title: t.title || "",
         artist: t.artist || "",
         album: t.album || "",
-        // GNOME's MPRIS popup can't render a data: URI, so on Linux point the
-        // artwork at the loopback /cover URL; Windows SMTC takes the data URI.
+        // Windows SMTC takes the data URI directly.
         artwork: coverUrl
           ? [
               {
-                src: (isLinux && currentPath ? coverArtUrl(currentPath) : coverUrl) ?? coverUrl,
+                src: coverUrl,
                 sizes: "512x512",
                 type: "image/jpeg",
               },
@@ -465,7 +553,9 @@ function App() {
 
   // Timeline position (music only — radio is live, so clear it). Windows
   // extrapolates between updates, so a per-second refresh keeps it accurate.
+  // Linux pushes position to MPRIS separately (see mprisPosition above).
   useEffect(() => {
+    if (isLinux) return;
     const ms = navigator.mediaSession;
     if (!ms || typeof ms.setPositionState !== "function") return;
     const a = engine.audio;

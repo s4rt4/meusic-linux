@@ -27,12 +27,36 @@ export async function getCover(path: string): Promise<string | null> {
 export const isLinux =
   /Linux|X11/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 
-/** HTTP cover-art URL for a track, served by the loopback server. GNOME's MPRIS
- *  media popup needs a fetchable art URL (a data: URI won't render), so on Linux
- *  mediaSession artwork points here. Null until the proxy port is known. */
-export function coverArtUrl(path: string): string | null {
-  if (cachedProxyPort == null) return null;
-  return `http://127.0.0.1:${cachedProxyPort}/cover?path=${encodeURIComponent(path)}`;
+/** Now-playing state pushed to the native MPRIS service (Linux). `path` is the
+ *  track file (null for radio); the backend extracts its cover for the popup. */
+export interface MprisMeta {
+  path: string | null;
+  title: string;
+  artist: string;
+  album: string;
+  lengthSecs: number;
+  status: "Playing" | "Paused" | "Stopped";
+}
+
+/** Push now-playing metadata + playback state to meusic's own MPRIS service so
+ *  the GNOME media popup shows full info incl. cover art. No-op off Linux —
+ *  webkit's MPRIS bridge can't expose `file://` art, so we run our own. */
+export async function mprisUpdate(m: MprisMeta): Promise<void> {
+  if (!isLinux) return;
+  await invoke("mpris_update", {
+    title: m.title,
+    artist: m.artist,
+    album: m.album,
+    lengthSecs: m.lengthSecs,
+    status: m.status,
+    path: m.path,
+  }).catch(() => {});
+}
+
+/** Update the MPRIS playback position (seconds). No-op off Linux. */
+export async function mprisPosition(secs: number): Promise<void> {
+  if (!isLinux) return;
+  await invoke("mpris_position", { secs }).catch(() => {});
 }
 
 /** Turn an absolute file path into a URL the <audio> element can play.

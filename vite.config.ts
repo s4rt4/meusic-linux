@@ -5,9 +5,22 @@ import tailwindcss from "@tailwindcss/vite";
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
+// WebKitGTK (Linux production) treats the `tauri://` custom scheme as an opaque
+// origin, so the `crossorigin` attribute Vite puts on the built <script>/<link>
+// triggers a CORS check that fails — the bundle never loads and the window is a
+// black screen. (Dev is fine: it loads over normal `http://localhost`.) Strip
+// the attribute from the emitted HTML so these same-origin asset loads aren't
+// gated.
+const stripCrossorigin = {
+  name: "strip-crossorigin",
+  transformIndexHtml(html: string) {
+    return html.replace(/\s+crossorigin(?==|\s|>)/g, "");
+  },
+};
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), stripCrossorigin],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

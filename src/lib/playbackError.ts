@@ -5,11 +5,12 @@
  * <audio> element and `invoke` live in usePlayer; this only turns a snapshot of
  * the error state into a log line.
  *
- * Why this exists: WebView2/Chromium's media demuxer is far stricter than the
- * ffmpeg-based decoders other players use. e.g. a FLAC whose embedded cover-art
- * PICTURE block has an empty MIME type makes Chromium reject the whole file with
- * MediaError 4 (SRC_NOT_SUPPORTED / DEMUXER_ERROR_COULD_NOT_OPEN), while every
- * full-ffmpeg player plays it fine. These errors were previously swallowed by
+ * Why this exists: the webview's media demuxer (WebView2/Chromium on Windows,
+ * WebKitGTK on Linux) is far stricter than the ffmpeg-based decoders other
+ * players use. e.g. a FLAC whose embedded cover-art PICTURE block has an empty
+ * MIME type makes the webview reject the whole file with MediaError 4
+ * (SRC_NOT_SUPPORTED / DEMUXER_ERROR_COULD_NOT_OPEN), while every full-ffmpeg
+ * player plays it fine. These errors were previously swallowed by
  * empty .catch() handlers, so failures were invisible; logging surfaces them.
  */
 
