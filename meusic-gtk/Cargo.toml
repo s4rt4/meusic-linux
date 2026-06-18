@@ -55,7 +55,9 @@ license-file = ["../LICENSE", "0"]
 extended-description = "A beautiful, native GTK4/libadwaita local music player for Linux: adaptive cover-art gradients, an equalizer, a spectrum visualizer, internet radio, and MPRIS media controls."
 section = "sound"
 priority = "optional"
-depends = "$auto, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good"
+# Explicit deps (host lacks dpkg-shlibdeps for $auto): the shared libs the
+# binary links + the dlopened GStreamer plugin packages.
+depends = "libc6, libgtk-4-1, libadwaita-1-0, libglib2.0-0, libcairo2, libgdk-pixbuf-2.0-0, libgstreamer1.0-0, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good"
 assets = [
     ["target/release/meusic", "usr/bin/meusic", "755"],
     ["packaging/com.sarta.meusic.gtk.desktop", "usr/share/applications/", "644"],
