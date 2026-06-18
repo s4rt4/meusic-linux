@@ -233,6 +233,8 @@ enum Msg {
     SetBool(SettingField, bool),
     TogglePowerSave,
     OpenAbout,
+    CloseRequest,
+    Quit,
     Tick,
 }
 
@@ -271,6 +273,15 @@ impl SimpleComponent for App {
             set_title: Some("meusic"),
             set_default_width: 1180,
             set_default_height: 760,
+
+            // Intercept the window-manager close (X). Whether it minimizes (keep
+            // playing) or actually quits is decided in update() from the current
+            // "close to tray" setting — always Stop here so the default destroy
+            // never races our decision.
+            connect_close_request[sender] => move |_| {
+                sender.input(Msg::CloseRequest);
+                glib::Propagation::Stop
+            },
 
             gtk::Overlay {
                 #[local_ref]
@@ -451,14 +462,17 @@ impl SimpleComponent for App {
                                             set_visible: !model.has_tray,
                                             set_icon_name: Some("help-about-symbolic"),
                                             set_tooltip_text: Some(
-                                                "Tak ada system tray (GNOME) — tutup = keluar, minimize = ke dock. \
-                                                 Opsi ini aktif di desktop dengan tray (mis. KDE)."
+                                                "Tak ada system tray (GNOME) — ikon tray & 'minimize ke tray' \
+                                                 tak berlaku. 'Close = minimize' di bawah tetap berfungsi: X \
+                                                 me-minimize app (tetap jalan) alih-alih keluar."
                                             ),
                                             add_css_class: "dim-label",
                                         },
                                     },
                                     gtk::Box {
                                         set_spacing: 10,
+                                        #[watch]
+                                        set_sensitive: model.has_tray,
                                         gtk::Label { set_label: "Ikon di system tray", set_hexpand: true, set_xalign: 0.0 },
                                         gtk::Switch {
                                             set_valign: gtk::Align::Center,
@@ -471,6 +485,8 @@ impl SimpleComponent for App {
                                     },
                                     gtk::Box {
                                         set_spacing: 10,
+                                        #[watch]
+                                        set_sensitive: model.has_tray,
                                         gtk::Label { set_label: "Minimize ke tray", set_hexpand: true, set_xalign: 0.0 },
                                         gtk::Switch {
                                             set_valign: gtk::Align::Center,
@@ -483,7 +499,15 @@ impl SimpleComponent for App {
                                     },
                                     gtk::Box {
                                         set_spacing: 10,
-                                        gtk::Label { set_label: "Close ke tray", set_hexpand: true, set_xalign: 0.0 },
+                                        #[watch]
+                                        set_tooltip_text: if model.has_tray { None } else {
+                                            Some("Tanpa tray: aktif = X me-minimize (app tetap jalan); nonaktif = X keluar.")
+                                        },
+                                        gtk::Label {
+                                            #[watch]
+                                            set_label: if model.has_tray { "Close ke tray" } else { "Close = minimize (jangan keluar)" },
+                                            set_hexpand: true, set_xalign: 0.0,
+                                        },
                                         gtk::Switch {
                                             set_valign: gtk::Align::Center,
                                             #[watch] set_active: model.settings.close_to_tray,
@@ -492,6 +516,18 @@ impl SimpleComponent for App {
                                                 glib::Propagation::Proceed
                                             },
                                         },
+                                    },
+
+                                    gtk::Separator { set_margin_top: 6 },
+                                    gtk::Button {
+                                        add_css_class: "flat",
+                                        set_margin_top: 2,
+                                        #[wrap(Some)]
+                                        set_child = &adw::ButtonContent {
+                                            set_icon_name: "application-exit-symbolic",
+                                            set_label: "Keluar",
+                                        },
+                                        connect_clicked => Msg::Quit,
                                     },
                                 },
                             },
@@ -1869,6 +1905,21 @@ impl SimpleComponent for App {
                 self.rebuild_stations();
             }
             Msg::OpenAbout => self.open_about(),
+            Msg::CloseRequest => {
+                // No system tray on stock GNOME, so "close to tray" is honored as
+                // minimize-to-dock: the window goes away but the app keeps playing
+                // (restore via the overview / Alt-Tab / dock). Turn the setting off
+                // for the conventional X = quit.
+                if self.settings.close_to_tray {
+                    self.window.minimize();
+                } else {
+                    self.sender.input(Msg::Quit);
+                }
+            }
+            Msg::Quit => {
+                self.save_session();
+                relm4::main_application().quit();
+            }
             Msg::TogglePowerSave => {
                 self.power_save = !self.power_save;
                 self.power_save_flag.set(self.power_save);
