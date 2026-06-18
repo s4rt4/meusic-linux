@@ -54,14 +54,14 @@ music changes.
 
 <table>
   <tr>
-    <td><img src="assets/ss/ss1.png" alt="meusic - green theme"></td>
-    <td><img src="assets/ss/ss2.png" alt="meusic - blue theme"></td>
-    <td><img src="assets/ss/ss3.png" alt="meusic - purple theme"></td>
+    <td><img src="assets/ss/ss1.png" alt="meusic - library, purple theme"></td>
+    <td><img src="assets/ss/ss2.png" alt="meusic - library, red theme"></td>
+    <td><img src="assets/ss/ss3.png" alt="meusic - library, amber theme"></td>
   </tr>
   <tr>
-    <td><img src="assets/ss/ss4.png" alt="meusic - amber theme"></td>
-    <td><img src="assets/ss/ss5.png" alt="meusic - red theme"></td>
-    <td><img src="assets/ss/ss6.png" alt="meusic - teal theme"></td>
+    <td><img src="assets/ss/ss4.png" alt="meusic - now playing, teal theme"></td>
+    <td><img src="assets/ss/ss5.png" alt="meusic - now playing, red theme"></td>
+    <td><img src="assets/ss/ss6.png" alt="meusic - now playing, amber theme"></td>
   </tr>
 </table>
 
