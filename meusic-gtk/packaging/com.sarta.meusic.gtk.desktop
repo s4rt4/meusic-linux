@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=meusic
+GenericName=Music Player
+Comment=Beautiful native local music player for Linux
+Exec=meusic
+Icon=com.sarta.meusic.gtk
+Terminal=false
+Categories=AudioVideo;Audio;Player;GTK;
+Keywords=music;audio;player;radio;flac;mp3;
+StartupNotify=true
+StartupWMClass=com.sarta.meusic.gtk

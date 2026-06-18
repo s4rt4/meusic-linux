@@ -19,7 +19,6 @@ pub struct Track {
     pub album_artist: String,
     pub track_no: u32,
     pub duration: u64, // seconds
-    pub has_cover: bool,
     pub format: String, // e.g. "FLAC", "MP3"
     pub bitrate: u32,   // kbps, 0 if unknown
 }
@@ -52,7 +51,6 @@ fn read_track(path: &Path) -> Track {
     let mut album_artist = String::new();
     let mut track_no = 0u32;
     let mut duration = 0u64;
-    let mut has_cover = false;
     let mut bitrate = 0u32;
     let format = path
         .extension()
@@ -89,7 +87,6 @@ fn read_track(path: &Path) -> Track {
             if let Some(tn) = tag.track() {
                 track_no = tn;
             }
-            has_cover = !tag.pictures().is_empty();
         }
     }
 
@@ -105,7 +102,6 @@ fn read_track(path: &Path) -> Track {
         album_artist,
         track_no,
         duration,
-        has_cover,
         format,
         bitrate,
     }
@@ -283,22 +279,48 @@ pub(crate) fn file_uri(p: &Path) -> String {
     out
 }
 
-/// Extract a track's cover to a temp file and return it as a `file://` URL, for
-/// the MPRIS `mpris:artUrl` (GNOME's media popup renders `file://` art). One
-/// file per track (hashed name) so the popup's art cache refreshes per track.
-pub fn art_file_url(path: &str) -> Option<String> {
-    let bytes = cover_bytes(path)?;
-    let ext = detect_ext(&bytes);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+/// Directory holding the temp cover/station art written for MPRIS artUrls.
+fn art_temp_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("meusic-art")
+}
+
+/// Write already-read cover bytes to a temp file (hashed by source path) and
+/// return a `file://` URL for the MPRIS `mpris:artUrl`. Takes the bytes the
+/// caller already decoded so the cover isn't re-read per play/pause.
+pub fn art_file_from_bytes(path: &str, bytes: &[u8]) -> Option<String> {
     use std::hash::{Hash, Hasher};
+    let ext = detect_ext(bytes);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
-    let dir = std::env::temp_dir().join("meusic-art");
+    let dir = art_temp_dir();
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join(format!("{:016x}.{ext}", hasher.finish()));
     if !file.exists() {
-        std::fs::write(&file, &bytes).ok()?;
+        std::fs::write(&file, bytes).ok()?;
     }
     Some(file_uri(&file))
+}
+
+/// Delete temp art files older than a week so the `meusic-art` dir doesn't grow
+/// without bound over a library's lifetime (files regenerate on demand).
+pub fn prune_temp_art() {
+    let Ok(rd) = std::fs::read_dir(art_temp_dir()) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    const WEEK: u64 = 7 * 24 * 3600;
+    for entry in rd.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|age| age.as_secs() > WEEK)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Human total duration, e.g. "7 jam 23 menit" or "23 menit".

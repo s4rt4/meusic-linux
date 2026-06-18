@@ -10,8 +10,10 @@ mod art;
 mod library;
 mod mpris;
 mod player;
+mod session;
 mod settings;
 mod stations;
+mod track_object;
 mod util;
 
 use library::{album_groups, artist_groups, cover_bytes, fmt_time, folder_groups, parent_dir,
@@ -19,6 +21,7 @@ use library::{album_groups, artist_groups, cover_bytes, fmt_time, folder_groups,
 use player::Player;
 use relm4::adw::prelude::*;
 use relm4::gtk::{gdk, gio, glib, pango};
+use track_object::TrackObject;
 use relm4::{adw, gtk, ComponentParts, ComponentSender, RelmApp, SimpleComponent};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -36,6 +39,10 @@ headerbar { box-shadow: none; min-height: 54px; }
 }
 list > row { border-radius: 10px; }
 list > row:hover { background-color: rgba(255, 255, 255, 0.06); }
+listview, listview > row { background-color: transparent; }
+listview > row { border-radius: 10px; padding: 0; }
+listview > row:hover { background-color: rgba(255, 255, 255, 0.06); }
+.songrow { border-radius: 10px; }
 .songrow.playing { background-color: rgba(255, 255, 255, 0.14); }
 .tab { padding: 4px 12px; border-radius: 8px; color: alpha(white, 0.55); }
 .tab.active { color: @accent_color; box-shadow: inset 0 -3px 0 @accent_bg_color; }
@@ -68,6 +75,14 @@ list > row:hover { background-color: rgba(255, 255, 255, 0.06); }
 .np-title { font-size: 2.4rem; font-weight: 800; }
 .npcover { border-radius: 22px; }
 .coverbtn { padding: 0; border-radius: 8px; }
+.volpct {
+    background-color: rgba(0, 0, 0, 0.55);
+    color: #ffffff;
+    border-radius: 6px;
+    padding: 1px 5px;
+    font-weight: 700;
+    font-size: 0.8em;
+}
 "#;
 
 type PaletteF = Vec<(f64, f64, f64)>;
@@ -122,10 +137,14 @@ struct App {
     queue: Vec<Track>,
     qidx: Option<usize>,
     current_path: Option<String>,
+    cur_art_url: Option<String>,
+    root_path: Option<String>,
+    pending_restore: Option<session::Session>,
     playing: bool,
     position: f64,
     duration: f64,
     scanning: bool,
+    music_err_streak: u32,
     repeat: Repeat,
     shuffle: bool,
     np_open: bool,
@@ -144,7 +163,8 @@ struct App {
     radio_last_pos: f64,
     radio_stall_ticks: u32,
     player: Player,
-    songlist: gtk::ListBox,
+    song_view: gtk::ListView,
+    song_model: gio::ListStore,
     sidebar: gtk::ListBox,
     stations_list: gtk::ListBox,
     radio_chip_state: Rc<RefCell<(String, (u8, u8, u8))>>,
@@ -153,17 +173,21 @@ struct App {
     bg: gtk::DrawingArea,
     cover: gtk::Image,
     np_cover: gtk::Picture,
-    np_vis: gtk::DrawingArea,
     np_bg: gtk::DrawingArea,
     accent_provider: gtk::CssProvider,
     palette: Rc<RefCell<PaletteF>>,
-    spectrum: Rc<RefCell<Vec<f64>>>,
     sidebar_keys: Rc<RefCell<Vec<String>>>,
     sidebar_icons: Rc<RefCell<Vec<(String, gtk::Image)>>>,
     station_keys: Rc<RefCell<Vec<String>>>,
-    song_rows: Rc<RefCell<Vec<(String, gtk::ListBoxRow, gtk::Box)>>>,
     station_rows: Rc<RefCell<Vec<(String, gtk::ListBoxRow)>>>,
-    eq_widget: gtk::DrawingArea,
+    // Currently-bound (visible/recycled) song rows — the playing highlight + the
+    // animated EQ indicator are applied over just these, not the whole library.
+    bound_rows: Rc<RefCell<Vec<(String, gtk::Box, gtk::DrawingArea)>>>,
+    current_path_shared: Rc<RefCell<Option<String>>>,
+    playing_eq: Rc<RefCell<Option<gtk::DrawingArea>>>,
+    playing_flag: Rc<Cell<bool>>,
+    volume_pct: gtk::Label,
+    volume_pct_gen: Rc<Cell<u64>>,
     logo_white: Option<gdk::Texture>,
     logo_green: Option<gdk::Texture>,
     power_save: bool,
@@ -176,7 +200,10 @@ struct App {
 #[derive(Debug)]
 enum Msg {
     PickFolder,
+    ScanStarted(String),
     Scanned(Vec<Track>),
+    RestoreSession,
+    SaveSession,
     SetMode(Mode),
     SelectGroup(String),
     Search(String),
@@ -564,9 +591,8 @@ impl SimpleComponent for App {
                                 set_vexpand: true,
 
                                 #[local_ref]
-                                songlist -> gtk::ListBox {
-                                    set_selection_mode: gtk::SelectionMode::None,
-                                    set_valign: gtk::Align::Start,
+                                song_view -> gtk::ListView {
+                                    add_css_class: "songview",
                                     set_margin_start: 8,
                                     set_margin_end: 8,
                                     set_margin_bottom: 8,
@@ -893,13 +919,22 @@ impl SimpleComponent for App {
                                         },
                                     },
                                 },
+                                #[local_ref]
+                                volume_pct -> gtk::Label {
+                                    add_css_class: "volpct",
+                                    add_css_class: "numeric",
+                                    set_width_chars: 4,
+                                    set_xalign: 1.0,
+                                    set_valign: gtk::Align::Center,
+                                },
                                 gtk::Image {
                                     set_icon_name: Some("meusic-volume-high"),
                                     add_css_class: "ctl",
                                 },
+                                #[name = "volume_scale"]
                                 gtk::Scale {
                                     set_range: (0.0, 1.0),
-                                    set_value: 1.0,
+                                    set_value: model.settings.volume,
                                     set_draw_value: false,
                                     set_width_request: 100,
                                     connect_value_changed[sender] => move |s| {
@@ -1025,6 +1060,13 @@ impl SimpleComponent for App {
         let app_settings = settings::load();
         let has_tray = settings::has_system_tray();
         let stations_data = stations::load();
+        // Last session — only meaningful for resume if a folder was saved.
+        let loaded_session = session::load();
+        let pending_restore = if loaded_session.root_path.is_empty() {
+            None
+        } else {
+            Some(loaded_session)
+        };
 
         if let Some(display) = gdk::Display::default() {
             let provider = gtk::CssProvider::new();
@@ -1034,9 +1076,9 @@ impl SimpleComponent for App {
                 &provider,
                 gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
             );
-            // Register the app's own (Lucide) icon set.
-            gtk::IconTheme::for_display(&display)
-                .add_search_path(concat!(env!("CARGO_MANIFEST_DIR"), "/icons"));
+            // Register the app's own (Lucide) icon set — from the baked-in
+            // GResource so it works in dev and when installed alike.
+            gtk::IconTheme::for_display(&display).add_resource_path("/com/sarta/meusic/icons");
         }
         let accent_provider = gtk::CssProvider::new();
         if let Some(display) = gdk::Display::default() {
@@ -1047,24 +1089,28 @@ impl SimpleComponent for App {
             );
         }
 
-        // Logo wordmark (white normally, green in power-save).
-        let load_logo = |path: &str| -> Option<gdk::Texture> {
-            gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(path, -1, 26, true)
+        // Logo wordmark (white normally, green in power-save) — from the GResource.
+        let load_logo = |resource: &str| -> Option<gdk::Texture> {
+            gtk::gdk_pixbuf::Pixbuf::from_resource_at_scale(resource, -1, 26, true)
                 .ok()
                 .map(|pb| gdk::Texture::for_pixbuf(&pb))
         };
-        let logo_white = load_logo(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo.svg"));
-        let logo_green = load_logo(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo-green.svg"));
+        let logo_white = load_logo("/com/sarta/meusic/assets/logo.svg");
+        let logo_green = load_logo("/com/sarta/meusic/assets/logo-green.svg");
 
         let player = Player::new();
         player.set_spectrum_enabled(!app_settings.power_save);
-        player.set_volume(1.0);
+        player.set_volume(app_settings.volume);
 
-        let songlist = gtk::ListBox::new();
         let sidebar = gtk::ListBox::new();
         let seek = gtk::Scale::new(gtk::Orientation::Horizontal, None::<&gtk::Adjustment>);
         let cover = gtk::Image::new();
         cover.set_icon_name(Some("meusic-music-note"));
+        // Transient volume-percent readout (fades in on change, out after ~1s).
+        // Uses opacity (not visibility) so it reserves space and the bar layout
+        // never jumps when it appears/disappears.
+        let volume_pct = gtk::Label::new(None);
+        volume_pct.set_opacity(0.0);
         let palette: Rc<RefCell<PaletteF>> = Rc::new(RefCell::new(
             art::default_palette()
                 .iter()
@@ -1089,42 +1135,150 @@ impl SimpleComponent for App {
             radio_chip_state.clone(),
         );
 
-        // Synthetic (cheap, not FFT-driven) equalizer indicator that animates on
-        // the currently-playing song row — moved between rows, drawn from a phase.
+        // ---- Virtualized song list (gtk::ListView) ----------------------------
+        // The model holds lightweight TrackObjects; only the handful of visible
+        // rows ever get widgets (the whole library no longer builds N rows).
         let eq_phase: Rc<Cell<f64>> = Rc::new(Cell::new(0.0));
-        let eq_widget = gtk::DrawingArea::new();
-        eq_widget.set_size_request(20, 16);
-        eq_widget.set_valign(gtk::Align::Center);
+        let current_path_shared: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let playing_eq: Rc<RefCell<Option<gtk::DrawingArea>>> = Rc::new(RefCell::new(None));
+        let bound_rows: Rc<RefCell<Vec<(String, gtk::Box, gtk::DrawingArea)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let playing_flag: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let song_model = gio::ListStore::new::<TrackObject>();
+
+        let factory = gtk::SignalListItemFactory::new();
+        // setup: build the (reusable) row widget tree once per recycled row.
         {
-            let phase = eq_phase.clone();
-            let pal = palette.clone();
-            eq_widget.set_draw_func(move |_, cr, w, h| {
-                let (w, h) = (w as f64, h as f64);
-                let pal = pal.borrow();
-                let (r, g, b) = pal.first().copied().unwrap_or((0.6, 0.6, 0.8));
-                cr.set_source_rgba(r, g, b, 0.95);
-                let ph = phase.get();
-                let n = 4usize;
-                let slot = w / n as f64;
-                let bw = slot * 0.55;
-                for i in 0..n {
-                    let v = 0.5 + 0.5 * (ph + i as f64 * 0.9).sin();
-                    let bh = (0.28 + 0.72 * v) * h;
-                    cr.rectangle(i as f64 * slot + (slot - bw) / 2.0, h - bh, bw, bh);
+            let eq_phase = eq_phase.clone();
+            let palette = palette.clone();
+            factory.connect_setup(move |_, item| {
+                let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+                row.add_css_class("songrow");
+                row.set_margin_top(5);
+                row.set_margin_bottom(5);
+                row.set_margin_start(10);
+                row.set_margin_end(10);
+
+                // Lead slot: the animated EQ indicator (shown only on the playing row).
+                let lead = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                lead.set_size_request(20, -1);
+                lead.set_valign(gtk::Align::Center);
+                let eq = gtk::DrawingArea::new();
+                eq.set_size_request(20, 16);
+                eq.set_valign(gtk::Align::Center);
+                eq.set_visible(false);
+                {
+                    let phase = eq_phase.clone();
+                    let pal = palette.clone();
+                    eq.set_draw_func(move |_, cr, w, h| {
+                        let (w, h) = (w as f64, h as f64);
+                        let pal = pal.borrow();
+                        let (r, g, b) = pal.first().copied().unwrap_or((0.6, 0.6, 0.8));
+                        cr.set_source_rgba(r, g, b, 0.95);
+                        let ph = phase.get();
+                        let n = 4usize;
+                        let slot = w / n as f64;
+                        let bw = slot * 0.55;
+                        for i in 0..n {
+                            let v = 0.5 + 0.5 * (ph + i as f64 * 0.9).sin();
+                            let bh = (0.28 + 0.72 * v) * h;
+                            cr.rectangle(i as f64 * slot + (slot - bw) / 2.0, h - bh, bw, bh);
+                        }
+                        let _ = cr.fill();
+                    });
                 }
-                let _ = cr.fill();
+                lead.append(&eq);
+
+                let info = gtk::Box::new(gtk::Orientation::Vertical, 1);
+                info.set_hexpand(true);
+                let title = gtk::Label::new(None);
+                title.set_xalign(0.0);
+                title.set_ellipsize(pango::EllipsizeMode::End);
+                let sub = gtk::Label::new(None);
+                sub.set_xalign(0.0);
+                sub.set_ellipsize(pango::EllipsizeMode::End);
+                sub.add_css_class("dim-label");
+                sub.add_css_class("caption");
+                info.append(&title);
+                info.append(&sub);
+
+                let dur = gtk::Label::new(None);
+                dur.add_css_class("dim-label");
+                dur.add_css_class("numeric");
+
+                row.append(&lead);
+                row.append(&info);
+                row.append(&dur);
+                item.set_child(Some(&row));
             });
         }
+        // bind: fill the row from its TrackObject + apply the playing highlight.
+        {
+            let current = current_path_shared.clone();
+            let playing_eq = playing_eq.clone();
+            let bound = bound_rows.clone();
+            factory.connect_bind(move |_, item| {
+                let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+                let Some(obj) = item.item().and_downcast::<TrackObject>() else { return };
+                let Some(row) = item.child().and_downcast::<gtk::Box>() else { return };
+                let t = obj.track();
+                let (eq, title, sub, dur) = row_widgets(&row);
+                title.set_label(&t.title);
+                sub.set_label(&format!("{} · {}", t.artist, t.album));
+                dur.set_label(&fmt_time(t.duration));
+                let is_cur = current.borrow().as_deref() == Some(t.path.as_str());
+                apply_row_state(&row, &eq, is_cur, &playing_eq);
+                bound.borrow_mut().push((t.path.clone(), row, eq));
+            });
+        }
+        // unbind: drop the row from the bound set (release the EQ indicator).
+        {
+            let bound = bound_rows.clone();
+            let playing_eq = playing_eq.clone();
+            factory.connect_unbind(move |_, item| {
+                let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+                let Some(row) = item.child().and_downcast::<gtk::Box>() else { return };
+                let mut clear = false;
+                bound.borrow_mut().retain(|(_, b, eq)| {
+                    if *b == row {
+                        if playing_eq.borrow().as_ref() == Some(eq) {
+                            clear = true;
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if clear {
+                    *playing_eq.borrow_mut() = None;
+                }
+            });
+        }
+
+        let selection = gtk::NoSelection::new(Some(song_model.clone()));
+        let song_view = gtk::ListView::new(Some(selection), Some(factory));
+        song_view.set_single_click_activate(true);
+        {
+            let play_sender = sender.clone();
+            song_view.connect_activate(move |_, pos| {
+                play_sender.input(Msg::PlayIndex(pos as usize));
+            });
+        }
+
+        // Animate the EQ indicator on the playing row (single shared phase, one
+        // queue_draw on the registered visible row — no work when idle/paused).
         {
             let phase = eq_phase.clone();
-            let w = eq_widget.clone();
             let ps = power_save_flag.clone();
+            let playing = playing_flag.clone();
+            let active = playing_eq.clone();
             glib::timeout_add_local(Duration::from_millis(110), move || {
-                // Animate only when not in power-save AND the indicator is on a
-                // (playing) row — idle/stopped = no work.
-                if !ps.get() && w.parent().is_some() {
-                    phase.set(phase.get() + 0.38);
-                    w.queue_draw();
+                if !ps.get() && playing.get() {
+                    if let Some(eq) = active.borrow().as_ref() {
+                        phase.set(phase.get() + 0.38);
+                        eq.queue_draw();
+                    }
                 }
                 glib::ControlFlow::Continue
             });
@@ -1197,14 +1351,6 @@ impl SimpleComponent for App {
             }
         });
 
-        let row_sender = sender.clone();
-        songlist.connect_row_activated(move |_, row| {
-            let idx = row.index();
-            if idx >= 0 {
-                row_sender.input(Msg::PlayIndex(idx as usize));
-            }
-        });
-
         let stations_list = gtk::ListBox::new();
         let station_keys: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let st_keys = station_keys.clone();
@@ -1238,6 +1384,14 @@ impl SimpleComponent for App {
             glib::ControlFlow::Continue
         });
 
+        // Periodically snapshot the session (mainly to capture the play position)
+        // so resume is up to date even without an explicit state change.
+        let save_sender = sender.clone();
+        glib::timeout_add_local(Duration::from_secs(5), move || {
+            save_sender.input(Msg::SaveSession);
+            glib::ControlFlow::Continue
+        });
+
         let ctl_sender = sender.clone();
         mpris::start(move |control| {
             use mpris::Control::*;
@@ -1262,10 +1416,14 @@ impl SimpleComponent for App {
             queue: Vec::new(),
             qidx: None,
             current_path: None,
+            cur_art_url: None,
+            root_path: None,
+            pending_restore,
             playing: false,
             position: 0.0,
             duration: 0.0,
             scanning: false,
+            music_err_streak: 0,
             repeat: Repeat::Off,
             shuffle: false,
             np_open: false,
@@ -1284,7 +1442,8 @@ impl SimpleComponent for App {
             radio_last_pos: 0.0,
             radio_stall_ticks: 0,
             player,
-            songlist: songlist.clone(),
+            song_view: song_view.clone(),
+            song_model: song_model.clone(),
             sidebar: sidebar.clone(),
             stations_list: stations_list.clone(),
             radio_chip_state,
@@ -1293,17 +1452,19 @@ impl SimpleComponent for App {
             bg: bg.clone(),
             cover: cover.clone(),
             np_cover: np_cover.clone(),
-            np_vis: np_vis.clone(),
             np_bg: np_bg.clone(),
             accent_provider,
             palette,
-            spectrum,
             sidebar_keys,
             sidebar_icons,
             station_keys,
-            song_rows: Rc::new(RefCell::new(Vec::new())),
             station_rows: Rc::new(RefCell::new(Vec::new())),
-            eq_widget: eq_widget.clone(),
+            bound_rows,
+            current_path_shared,
+            playing_eq,
+            playing_flag,
+            volume_pct: volume_pct.clone(),
+            volume_pct_gen: Rc::new(Cell::new(0)),
             logo_white,
             logo_green,
             power_save: power_save_flag.get(),
@@ -1314,6 +1475,22 @@ impl SimpleComponent for App {
         };
         model.rebuild_stations();
         let widgets = view_output!();
+
+        // Volume slider: scroll over it to adjust by the configured step (percent).
+        {
+            let step = (model.settings.volume_scroll_step as f64 / 100.0).clamp(0.01, 1.0);
+            let scale = widgets.volume_scale.clone();
+            let scroll =
+                gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            scroll.connect_scroll(move |_, _dx, dy| {
+                // Scroll up (dy < 0) raises the volume; the value-changed handler
+                // pushes it to the player + persists it.
+                let next = (scale.value() - dy.signum() * step).clamp(0.0, 1.0);
+                scale.set_value(next);
+                glib::Propagation::Stop
+            });
+            widgets.volume_scale.add_controller(scroll);
+        }
 
         // Responsive: when the window is narrow, collapse the tab + "Buka Folder"
         // labels to icon-only (the logo stays fixed instead of shrinking away).
@@ -1334,6 +1511,12 @@ impl SimpleComponent for App {
         }
         root.add_breakpoint(breakpoint);
 
+        // Kick off last-session restore (re-scan the saved folder, then restore
+        // page/track per the settings) once the component is up.
+        if model.pending_restore.is_some() {
+            sender.input(Msg::RestoreSession);
+        }
+
         ComponentParts { model, widgets }
     }
 
@@ -1342,36 +1525,66 @@ impl SimpleComponent for App {
             Msg::PickFolder => {
                 let dialog = gtk::FileDialog::builder().title("Buka Folder").build();
                 let scan_sender = sender.clone();
+                // Mark "scanning" only once a folder is actually chosen — if the
+                // dialog is cancelled the callback returns early and we must not
+                // get stuck showing "Memindai…" forever.
                 dialog.select_folder(None::<&gtk::Window>, gio::Cancellable::NONE, move |result| {
                     let Ok(folder) = result else { return };
                     let Some(path) = folder.path() else { return };
+                    let path = path.to_string_lossy().to_string();
+                    scan_sender.input(Msg::ScanStarted(path.clone()));
                     let scan_sender = scan_sender.clone();
                     std::thread::spawn(move || {
-                        let tracks = scan_folder(&path.to_string_lossy());
+                        let tracks = scan_folder(&path);
                         scan_sender.input(Msg::Scanned(tracks));
                     });
                 });
+            }
+            Msg::ScanStarted(path) => {
                 self.scanning = true;
+                self.root_path = Some(path);
             }
             Msg::Scanned(tracks) => {
                 self.scanning = false;
                 self.all_tracks = tracks;
-                self.sel_group = None;
-                self.rebuild_sidebar();
-                self.recompute_view();
+                // A pending restore (startup) applies the saved page/track instead
+                // of the default reset.
+                if let Some(s) = self.pending_restore.take() {
+                    self.restore_from_session(s);
+                } else {
+                    self.sel_group = None;
+                    self.rebuild_sidebar();
+                    self.recompute_view();
+                }
+                self.save_session();
             }
+            Msg::RestoreSession => {
+                if let Some(s) = self.pending_restore.clone() {
+                    self.root_path = Some(s.root_path.clone());
+                    self.scanning = true;
+                    let scan_sender = sender.clone();
+                    let root = s.root_path.clone();
+                    std::thread::spawn(move || {
+                        let tracks = scan_folder(&root);
+                        scan_sender.input(Msg::Scanned(tracks));
+                    });
+                }
+            }
+            Msg::SaveSession => self.save_session(),
             Msg::SetMode(m) => {
                 if self.mode != m {
                     self.mode = m;
                     self.sel_group = None;
                     self.rebuild_sidebar();
                     self.recompute_view();
+                    self.save_session();
                 }
             }
             Msg::SelectGroup(key) => {
                 self.sel_group = Some(key);
                 self.recompute_view();
                 self.refresh_folder_icons();
+                self.save_session();
             }
             Msg::Search(q) => {
                 self.query = q;
@@ -1380,6 +1593,7 @@ impl SimpleComponent for App {
             }
             Msg::PlayIndex(i) => {
                 if i < self.view_tracks.len() {
+                    self.music_err_streak = 0;
                     self.queue = self.view_tracks.clone();
                     self.play_at(i);
                 }
@@ -1414,6 +1628,7 @@ impl SimpleComponent for App {
                 self.refresh_highlight();
                 self.apply_visuals(None);
                 self.mpris_sync();
+                self.save_session();
             }
             Msg::Next => {
                 // EOS in radio = the live stream dropped → reconnect, don't advance.
@@ -1461,13 +1676,35 @@ impl SimpleComponent for App {
             }
             Msg::SetVolume(v) => {
                 self.player.set_volume(v);
+                // Transient percent readout: show now, hide ~1s after the last
+                // change (a generation token cancels stale hide timers).
+                self.volume_pct
+                    .set_label(&format!("{}%", (v * 100.0).round() as i32));
+                self.volume_pct.set_opacity(1.0);
+                let token = self.volume_pct_gen.get().wrapping_add(1);
+                self.volume_pct_gen.set(token);
+                let lbl = self.volume_pct.clone();
+                let gen_cell = self.volume_pct_gen.clone();
+                glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                    if gen_cell.get() == token {
+                        lbl.set_opacity(0.0);
+                    }
+                });
+                // Persist, rounded to 0.01 — skips the flood of redundant writes
+                // a slider drag would otherwise produce.
+                let rounded = (v * 100.0).round() / 100.0;
+                if (self.settings.volume - rounded).abs() > f64::EPSILON {
+                    self.settings.volume = rounded;
+                    settings::save(&self.settings);
+                }
             }
             Msg::Raise => {
                 self.window.present();
             }
             Msg::OpenNowPlaying => {
-                // Disabled in power-save (the visualizer is frozen there).
-                if self.qidx.is_some() && !self.power_save {
+                // Music-only (the NP view is cover + linear visualizer); radio has
+                // its own radial panel. Disabled in power-save (visualizer frozen).
+                if self.app_mode == AppMode::Music && self.qidx.is_some() && !self.power_save {
                     self.np_open = true;
                 }
             }
@@ -1486,6 +1723,12 @@ impl SimpleComponent for App {
                     match m {
                         AppMode::Radio => {
                             self.radio_title = None;
+                            // Refresh the cached art for whatever station is current
+                            // (don't leave a music cover in the MPRIS popup).
+                            self.cur_art_url = self
+                                .cur_station()
+                                .map(|s| s.name.clone())
+                                .and_then(|n| art::station_art_file(&n));
                         }
                         AppMode::Music => {
                             // Re-prime the (paused) track so Play resumes it.
@@ -1530,6 +1773,8 @@ impl SimpleComponent for App {
                     *self.radio_chip_state.borrow_mut() =
                         (stations::initials(&st.name), (r, g, b));
                     self.radio_vis.queue_draw();
+                    // Render the station chip PNG once here; mpris_sync reuses it.
+                    self.cur_art_url = art::station_art_file(&st.name);
                     self.refresh_station_highlight();
                     self.mpris_sync();
                 }
@@ -1563,6 +1808,25 @@ impl SimpleComponent for App {
                         self.schedule_reconnect();
                     }
                     self.mpris_sync();
+                } else if self.app_mode == AppMode::Music && self.qidx.is_some() {
+                    // A music file failed to decode/open — skip it. Guard against a
+                    // tight error loop (e.g. a queue full of broken files) by giving
+                    // up once we've errored through the whole queue without a single
+                    // track playing. The streak resets when a track starts playing
+                    // (Tick) or the user picks a track (PlayIndex).
+                    self.music_err_streak += 1;
+                    if self.music_err_streak as usize >= self.queue.len().max(1) {
+                        self.music_err_streak = 0;
+                        self.player.stop();
+                        self.playing = false;
+                        self.qidx = None;
+                        self.current_path = None;
+                        self.refresh_highlight();
+                        self.apply_visuals(None);
+                        self.mpris_sync();
+                    } else {
+                        self.advance(false);
+                    }
                 }
             }
             Msg::ReconnectRadio => {
@@ -1644,7 +1908,14 @@ impl SimpleComponent for App {
                                 self.radio_stall_ticks = 0;
                             } else {
                                 self.radio_stall_ticks += 1;
-                                if self.radio_stall_ticks > RADIO_STALL_TICKS {
+                                // The tick fires 4× slower in power-save, so scale
+                                // the threshold to keep the stall timeout ~12s.
+                                let limit = if self.power_save {
+                                    RADIO_STALL_TICKS / 4
+                                } else {
+                                    RADIO_STALL_TICKS
+                                };
+                                if self.radio_stall_ticks > limit {
                                     self.schedule_reconnect();
                                 }
                             }
@@ -1656,6 +1927,11 @@ impl SimpleComponent for App {
                         self.position = pos;
                     }
                     self.position = self.player.position();
+                    // A track that has actually started decoding clears the
+                    // consecutive-error guard.
+                    if self.position > 0.5 {
+                        self.music_err_streak = 0;
+                    }
                     let d = self.player.duration();
                     if d > 0.0 {
                         self.duration = d;
@@ -1747,9 +2023,15 @@ impl App {
         format!("{} lagu · {}", self.view_tracks.len(), library::fmt_total(total))
     }
     fn now_format(&self) -> String {
+        if self.app_mode != AppMode::Music {
+            return String::new();
+        }
         self.cur().map(|t| t.format.clone()).unwrap_or_default()
     }
     fn now_kbps(&self) -> String {
+        if self.app_mode != AppMode::Music {
+            return String::new();
+        }
         match self.cur() {
             Some(t) if t.bitrate > 0 => format!("{} kbps", t.bitrate),
             _ => String::new(),
@@ -1864,69 +2146,31 @@ impl App {
     }
 
     fn rebuild_songlist(&self) {
-        while let Some(child) = self.songlist.first_child() {
-            self.songlist.remove(&child);
-        }
-        let mut rows = Vec::with_capacity(self.view_tracks.len());
-        for t in &self.view_tracks {
-            let row = gtk::ListBoxRow::new();
-            row.set_activatable(true);
-            row.add_css_class("songrow");
-
-            let b = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-            b.set_margin_top(5);
-            b.set_margin_bottom(5);
-            b.set_margin_start(10);
-            b.set_margin_end(10);
-
-            // Lead slot: holds the animated EQ indicator on the playing row.
-            let lead = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            lead.set_size_request(20, -1);
-            lead.set_valign(gtk::Align::Center);
-
-            let info = gtk::Box::new(gtk::Orientation::Vertical, 1);
-            info.set_hexpand(true);
-            let title = gtk::Label::new(Some(&t.title));
-            title.set_xalign(0.0);
-            title.set_ellipsize(pango::EllipsizeMode::End);
-            let sub = gtk::Label::new(Some(&format!("{} · {}", t.artist, t.album)));
-            sub.set_xalign(0.0);
-            sub.set_ellipsize(pango::EllipsizeMode::End);
-            sub.add_css_class("dim-label");
-            sub.add_css_class("caption");
-            info.append(&title);
-            info.append(&sub);
-
-            let dur = gtk::Label::new(Some(&fmt_time(t.duration)));
-            dur.add_css_class("dim-label");
-            dur.add_css_class("numeric");
-
-            b.append(&lead);
-            b.append(&info);
-            b.append(&dur);
-            row.set_child(Some(&b));
-            self.songlist.append(&row);
-            rows.push((t.path.clone(), row, lead));
-        }
-        *self.song_rows.borrow_mut() = rows;
+        // Swap the whole model in one splice (no per-row widget work — the
+        // ListView realizes only the visible rows via the factory).
+        let objs: Vec<TrackObject> = self
+            .view_tracks
+            .iter()
+            .cloned()
+            .map(TrackObject::new)
+            .collect();
+        self.song_model
+            .splice(0, self.song_model.n_items(), &objs);
     }
 
     fn refresh_highlight(&self) {
-        // Detach the single EQ indicator from wherever it is, then place it on
-        // the playing row.
-        if let Some(p) = self.eq_widget.parent() {
-            if let Some(b) = p.downcast_ref::<gtk::Box>() {
-                b.remove(&self.eq_widget);
-            }
-        }
+        // Mirror the current path so newly-bound rows (on scroll) pick up the
+        // highlight, then re-apply it across the rows bound right now.
+        *self.current_path_shared.borrow_mut() = self.current_path.clone();
         let cur = self.current_path.clone();
-        for (path, row, lead) in self.song_rows.borrow().iter() {
-            if cur.as_deref() == Some(path.as_str()) {
-                row.add_css_class("playing");
-                lead.append(&self.eq_widget);
-            } else {
-                row.remove_css_class("playing");
-            }
+        let mut found = false;
+        for (path, row, eq) in self.bound_rows.borrow().iter() {
+            let is_cur = cur.as_deref() == Some(path.as_str());
+            apply_row_state(row, eq, is_cur, &self.playing_eq);
+            found |= is_cur;
+        }
+        if !found {
+            *self.playing_eq.borrow_mut() = None;
         }
     }
 
@@ -1942,6 +2186,8 @@ impl App {
             self.refresh_highlight();
             self.apply_visuals(Some(&t.path));
             self.mpris_sync();
+            self.scroll_to_current();
+            self.save_session();
         }
     }
 
@@ -1978,18 +2224,25 @@ impl App {
             self.refresh_highlight();
             self.apply_visuals(None);
             self.mpris_sync();
+            self.save_session();
             return;
         };
         self.play_at(next);
     }
 
-    fn apply_visuals(&self, path: Option<&str>) {
-        let (texture, palette) = match path.and_then(cover_bytes) {
-            Some(bytes) => (
-                art::texture_from_bytes(&bytes),
-                art::palette_from_bytes(&bytes, 4),
-            ),
+    fn apply_visuals(&mut self, path: Option<&str>) {
+        // Read the cover bytes ONCE per track change, then derive everything
+        // (display texture, palette, and the MPRIS art file) from the same
+        // bytes — previously the cover was read+parsed twice (here + mpris_sync)
+        // and the MPRIS art was re-read on every play/pause.
+        let bytes = path.and_then(cover_bytes);
+        let (texture, palette) = match &bytes {
+            Some(b) => (art::texture_from_bytes(b), art::palette_from_bytes(b, 4)),
             None => (None, art::default_palette()),
+        };
+        self.cur_art_url = match (path, &bytes) {
+            (Some(p), Some(b)) => library::art_file_from_bytes(p, b),
+            _ => None,
         };
         match &texture {
             Some(tex) => self.cover.set_paintable(Some(tex)),
@@ -2008,7 +2261,78 @@ impl App {
         ));
     }
 
+    /// follow_song: scroll the list so the playing track is visible (only if it's
+    /// present in the current view).
+    fn scroll_to_current(&self) {
+        if !self.settings.follow_song {
+            return;
+        }
+        let Some(path) = self.current_path.as_deref() else {
+            return;
+        };
+        if let Some(idx) = self.view_tracks.iter().position(|t| t.path == path) {
+            self.song_view
+                .scroll_to(idx as u32, gtk::ListScrollFlags::NONE, None);
+        }
+    }
+
+    /// Snapshot the current page + playback into session.json (resume source).
+    /// No-op until a folder has been opened (nothing meaningful to resume).
+    fn save_session(&self) {
+        let Some(root) = self.root_path.clone() else {
+            return;
+        };
+        session::save(&session::Session {
+            root_path: root,
+            mode: mode_key(self.mode).to_string(),
+            sel_group: self.sel_group.clone(),
+            track_path: self.current_path.clone(),
+            position: self.position,
+        });
+    }
+
+    /// Apply a saved session after its folder has been (re)scanned: restore the
+    /// page (resume_startup_page) and prime the last track paused at its saved
+    /// position (remember_last_played).
+    fn restore_from_session(&mut self, s: session::Session) {
+        if self.settings.resume_startup_page {
+            self.mode = mode_from_key(&s.mode);
+            self.sel_group = s.sel_group.clone();
+        } else {
+            self.sel_group = None;
+        }
+        self.rebuild_sidebar();
+        self.recompute_view();
+
+        if self.settings.remember_last_played {
+            if let Some(tp) = s.track_path {
+                if let Some(idx) = self.all_tracks.iter().position(|t| t.path == tp) {
+                    // Resume queue = the full library (matches the original app).
+                    self.queue = self.all_tracks.clone();
+                    let t = self.queue[idx].clone();
+                    self.player.load(&t.path);
+                    self.player.pause();
+                    self.qidx = Some(idx);
+                    self.current_path = Some(tp);
+                    self.playing = false;
+                    self.position = s.position;
+                    self.duration = t.duration as f64;
+                    // Seek to the saved spot on the next tick (after the pipeline
+                    // has a duration), the same mechanism the radio↔music swap uses.
+                    self.pending_seek = Some(s.position);
+                    self.refresh_highlight();
+                    self.apply_visuals(Some(&t.path));
+                    self.mpris_sync();
+                    self.scroll_to_current();
+                }
+            }
+        }
+    }
+
     fn mpris_sync(&self) {
+        // Central place every playback-state change passes through — also gates
+        // the EQ-indicator animation (only animate while actually playing).
+        self.playing_flag.set(self.playing);
         match self.app_mode {
             AppMode::Radio => {
                 let status = if self.station_id.is_none() {
@@ -2025,7 +2349,9 @@ impl App {
                         "",
                         0.0,
                         status,
-                        art::station_art_file(&s.name),
+                        // Cached station chip PNG (rendered once on station select)
+                        // — not re-encoded on every ICY title / pause.
+                        self.cur_art_url.clone(),
                         Some(&s.id),
                     ),
                     None => mpris::update("", "", "", 0.0, status, None, None),
@@ -2046,7 +2372,8 @@ impl App {
                         &t.album,
                         t.duration as f64,
                         status,
-                        library::art_file_url(&t.path),
+                        // Cached cover file (written once in apply_visuals).
+                        self.cur_art_url.clone(),
                         Some(&t.path),
                     ),
                     None => mpris::update("", "", "", 0.0, status, None, None),
@@ -2322,6 +2649,67 @@ fn track_key(t: &Track, m: Mode) -> String {
     }
 }
 
+/// Persisted string key for a view mode (session.json).
+fn mode_key(m: Mode) -> &'static str {
+    match m {
+        Mode::Folders => "folders",
+        Mode::Albums => "albums",
+        Mode::Artists => "artists",
+        Mode::Songs => "songs",
+    }
+}
+
+fn mode_from_key(s: &str) -> Mode {
+    match s {
+        "albums" => Mode::Albums,
+        "artists" => Mode::Artists,
+        "songs" => Mode::Songs,
+        _ => Mode::Folders,
+    }
+}
+
+/// Reach a song row's child widgets — the factory builds a fixed structure:
+/// `[ lead[ eq ], info[ title, sub ], dur ]`.
+fn row_widgets(row: &gtk::Box) -> (gtk::DrawingArea, gtk::Label, gtk::Label, gtk::Label) {
+    let lead = row.first_child().expect("row.lead");
+    let eq = lead
+        .first_child()
+        .and_downcast::<gtk::DrawingArea>()
+        .expect("lead.eq");
+    let info = lead.next_sibling().expect("row.info");
+    let title = info
+        .first_child()
+        .and_downcast::<gtk::Label>()
+        .expect("info.title");
+    let sub = title
+        .next_sibling()
+        .and_downcast::<gtk::Label>()
+        .expect("info.sub");
+    let dur = info
+        .next_sibling()
+        .and_downcast::<gtk::Label>()
+        .expect("row.dur");
+    (eq, title, sub, dur)
+}
+
+/// Toggle a row's "playing" look + register/release the animated EQ indicator.
+fn apply_row_state(
+    row: &gtk::Box,
+    eq: &gtk::DrawingArea,
+    is_cur: bool,
+    playing_eq: &Rc<RefCell<Option<gtk::DrawingArea>>>,
+) {
+    if is_cur {
+        row.add_css_class("playing");
+        eq.set_visible(true);
+        *playing_eq.borrow_mut() = Some(eq.clone());
+        eq.queue_draw();
+    } else {
+        row.remove_css_class("playing");
+        eq.set_visible(false);
+    }
+}
+
 
 /// The adaptive gradient background (soft drifting-style blobs from the cover
 /// palette over a near-black base + a vignette). Shared by the main window and
@@ -2506,6 +2894,11 @@ fn main() {
     if let Err(e) = gstreamer::init() {
         eprintln!("meusic: failed to init GStreamer: {e}");
     }
+    // Icons + logos are baked into the binary as a GResource (see build.rs).
+    gio::resources_register_include!("meusic.gresource")
+        .expect("failed to register meusic resources");
+    // Drop stale temp cover/station art so it doesn't accumulate forever.
+    library::prune_temp_art();
     let app = RelmApp::new("com.sarta.meusic.gtk");
     app.run::<App>(());
 }

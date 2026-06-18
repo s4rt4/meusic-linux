@@ -167,7 +167,7 @@ pub fn station_art_file(name: &str) -> Option<String> {
     use std::hash::{Hash, Hasher};
 
     let size = 320;
-    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, size, size).ok()?;
+    let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, size, size).ok()?;
     {
         let cr = cairo::Context::new(&surface).ok()?;
         let s = size as f64;
@@ -195,9 +195,20 @@ pub fn station_art_file(name: &str) -> Option<String> {
     let dir = std::env::temp_dir().join("meusic-art");
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join(format!("station-{:016x}.png", hasher.finish()));
-    // Save via gdk-pixbuf (the cairo `png` feature isn't enabled).
-    let pixbuf = gdk::pixbuf_get_from_surface(&surface, 0, 0, size, size)?;
-    pixbuf.savev(&file, "png", &[]).ok()?;
+    // Encode via a GDK texture (the cairo `png` feature isn't enabled, and
+    // gdk-pixbuf's surface importer is deprecated since 4.12). The cairo ARGB32
+    // surface is premultiplied native-endian → GDK's B8G8R8A8 premultiplied.
+    let stride = surface.stride() as usize;
+    let pixels = surface.data().ok()?;
+    let texture = gdk::MemoryTexture::new(
+        size,
+        size,
+        gdk::MemoryFormat::B8g8r8a8Premultiplied,
+        &glib::Bytes::from(&pixels[..]),
+        stride,
+    );
+    drop(pixels);
+    std::fs::write(&file, texture.save_to_png_bytes()).ok()?;
     Some(crate::library::file_uri(&file))
 }
 

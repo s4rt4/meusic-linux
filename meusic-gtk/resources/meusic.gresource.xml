@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/sarta/meusic">
+    <file>icons/com.sarta.meusic.gtk.svg</file>
+    <file>icons/meusic-album.svg</file>
+    <file>icons/meusic-artist.svg</file>
+    <file>icons/meusic-audio-lines.svg</file>
+    <file>icons/meusic-chevron.svg</file>
+    <file>icons/meusic-close.svg</file>
+    <file>icons/meusic-folder-open.svg</file>
+    <file>icons/meusic-folder-plus.svg</file>
+    <file>icons/meusic-folder.svg</file>
+    <file>icons/meusic-github.svg</file>
+    <file>icons/meusic-heart.svg</file>
+    <file>icons/meusic-leaf-green.svg</file>
+    <file>icons/meusic-leaf.svg</file>
+    <file>icons/meusic-menu.svg</file>
+    <file>icons/meusic-music-note.svg</file>
+    <file>icons/meusic-next.svg</file>
+    <file>icons/meusic-pause.svg</file>
+    <file>icons/meusic-pencil.svg</file>
+    <file>icons/meusic-play.svg</file>
+    <file>icons/meusic-plus.svg</file>
+    <file>icons/meusic-prev.svg</file>
+    <file>icons/meusic-radio.svg</file>
+    <file>icons/meusic-repeat-one.svg</file>
+    <file>icons/meusic-repeat.svg</file>
+    <file>icons/meusic-search.svg</file>
+    <file>icons/meusic-shuffle.svg</file>
+    <file>icons/meusic-sliders.svg</file>
+    <file>icons/meusic-sliders-vertical.svg</file>
+    <file>icons/meusic-trash.svg</file>
+    <file>icons/meusic-volume-high.svg</file>
+    <file>icons/meusic-volume-low.svg</file>
+    <file>icons/meusic-volume-mute.svg</file>
+    <file>assets/logo.svg</file>
+    <file>assets/logo-green.svg</file>
+  </gresource>
+</gresources>
